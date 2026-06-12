@@ -1,0 +1,65 @@
+<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>VoiceS3R Control</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;padding:12px;background:#0e1116;color:#e6e6e6}
+h2{color:#39d98a;margin:.3em 0}
+h3{color:#7aa2ff;margin:1em 0 .3em;border-bottom:1px solid #2a2f3a;padding-bottom:3px}
+button{background:#1f6feb;color:#fff;border:0;border-radius:6px;padding:9px 12px;margin:3px 2px;font-size:15px}
+button.alt{background:#2a2f3a}
+button.warn{background:#b5462b}
+input{background:#161b22;color:#e6e6e6;border:1px solid #2a2f3a;border-radius:5px;padding:7px;width:70px;font-size:15px}
+.row{margin:6px 0}
+#out{background:#000;color:#39d98a;font-family:monospace;font-size:13px;white-space:pre-wrap;
+padding:8px;border-radius:6px;min-height:80px;margin-top:8px;border:1px solid #2a2f3a}
+pre#info{background:#161b22;padding:8px;border-radius:6px;white-space:pre-wrap;font-size:13px}
+</style></head><body>
+<h2>ATOM VoiceS3R — Control</h2>
+<pre id=info>loading...</pre>
+<button class=alt onclick="get('/info',true)">Refresh details</button>
+
+<h3>1. GPIO test (find an LED)</h3>
+<div class=row>
+GPIO <input id=gpin type=number value=35>
+<button onclick="gpio(1)">HIGH</button>
+<button class=alt onclick="gpio(0)">LOW</button>
+</div>
+<div class=row>Try pins one by one (e.g. 35, 21, 33, 46, 2, 1) and watch for any light.</div>
+
+<h3>2. Beep / amplifier</h3>
+<div class=row>
+freq <input id=bf type=number value=880> ms <input id=bm type=number value=300>
+<button onclick="beep()">BEEP</button>
+</div>
+<div class=row>
+<button onclick="get('/pa?on=1')">PA ON</button>
+<button class=alt onclick="get('/pa?on=0')">PA OFF</button>
+vol <input id=vv type=number value=85><button onclick="vol()">SET VOL</button>
+</div>
+
+<h3>3. Voice / mic</h3>
+<div class=row>
+<button onclick="get('/play')">PLAY VOICE</button>
+<button class=alt onclick="get('/mic')">MIC LEVEL</button>
+</div>
+
+<h3>4. ES8311 registers (advanced)</h3>
+<div class=row>
+reg <input id=ra value=0x00> val <input id=rv placeholder=read>
+<button onclick="reg()">READ</button>
+<button class=alt onclick="regw()">WRITE</button>
+</div>
+
+<div id=out></div>
+<script>
+const out=document.getElementById('out');
+function log(t){out.textContent=(t+"\n"+out.textContent).slice(0,2000);}
+function get(u,info){fetch(u).then(r=>r.text()).then(t=>{if(info){document.getElementById('info').textContent=t;}else{log(t);}}).catch(e=>log('ERR '+e));}
+function gpio(l){get('/gpio?pin='+document.getElementById('gpin').value+'&level='+l);}
+function beep(){get('/beep?freq='+document.getElementById('bf').value+'&ms='+document.getElementById('bm').value);}
+function vol(){get('/vol?v='+document.getElementById('vv').value);}
+function reg(){get('/reg?addr='+document.getElementById('ra').value);}
+function regw(){get('/reg?addr='+document.getElementById('ra').value+'&val='+document.getElementById('rv').value);}
+get('/info',true);
+</script>
+</body></html>

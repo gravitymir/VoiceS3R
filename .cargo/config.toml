@@ -1,0 +1,20 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+# Windows MAX_PATH workaround: ESP-IDF's nested build paths overflow 260 chars
+# under the default target/ dir. Keep build artifacts under a very short path.
+target-dir = "C:/et"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+runner = "espflash flash --monitor" # `cargo run` flashes bootloader + partition table + app, then monitors
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+# ESP-IDF version pulled and built by esp-idf-sys on first build.
+ESP_IDF_VERSION = "v5.3.3"
+# Explicitly point esp-idf-sys at our sdkconfig.defaults (it was not auto-detected).
+ESP_IDF_SDKCONFIG_DEFAULTS = { value = "sdkconfig.defaults", relative = true }

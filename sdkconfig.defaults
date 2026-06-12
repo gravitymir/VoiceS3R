@@ -1,0 +1,18 @@
+# Rust main task needs a bigger stack than the default.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32000
+
+# 8MB Octal PSRAM on the ESP32-S3-PICO-1-N8R8 (used for audio buffers).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# 1kHz tick gives finer-grained I2S / socket timeouts.
+CONFIG_FREERTOS_HZ=1000
+
+# Phone browsers send large request headers on the provisioning POST; the
+# default 512 is too small ("Header fields are too long").
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+# Keep logs readable over the USB serial monitor.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

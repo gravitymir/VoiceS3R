@@ -1,0 +1,8 @@
+/target
+/.embuild
+*.log
+.vscode
+.claude
+# Reference material / generated artifacts (not part of the firmware)
+*.pdf
+/ref
