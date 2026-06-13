@@ -55,10 +55,13 @@ On first boot (or after a failed connection):
 
 1. Connect a phone to WiFi **`VoiceS3R`** (password `21212122`).
 2. Open **http://192.168.71.1/**.
-3. Enter your home WiFi SSID + password, the PC server `host:port`
-   (e.g. `192.168.8.100:9000`), and a speaker volume, then **CONNECT**.
+3. Add up to **5 WiFi networks** (➕ Add WiFi), each with its SSID, password, and
+   its own PC server `host:port` (e.g. `192.168.8.100:9000`) — handy when the
+   server IP differs by location. Press **CONNECT**.
 
-Credentials persist in NVS across reboots.
+The device tries each network in order until one connects, and uses that
+network's server address. Credentials persist in NVS across reboots. Speaker
+volume is set by voice ("set volume 50"), not on the page.
 
 ## Building & flashing
 

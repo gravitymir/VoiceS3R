@@ -70,10 +70,15 @@ impl<'d> Codec<'d> {
         };
         codec.pa_enable.set_high()?;
 
-        // Configure the microphone path (the crate's init() does NOT do this):
-        // reg0x14 = enable analog MIC + PGA gain, reg0x17 = ADC gain full.
-        codec.write_reg(0x14, 0x1A)?;
-        codec.write_reg(0x17, 0xFF)?;
+        // Configure the microphone path (the crate's init() does NOT do this).
+        // The MEMS mic is sensitive: full ADC gain clips hard (rails at 32767),
+        // which destroys the waveform for speech recognition. Use a 0 dB PGA
+        // scale-up and a reduced ADC digital volume instead of max.
+        // reg0x17 is ADC digital volume in 0.5 dB steps: 0xBF = 0 dB, 0xFF = +32 dB
+        // (clips this sensitive mic), 0x40 ~= -63 dB (silence). 0 dB is the sweet spot.
+        codec.write_reg(0x14, 0x1A)?; // enable analog MIC
+        codec.write_reg(0x16, 0x00)?; // ADC PGA scale-up = 0 dB
+        codec.write_reg(0x17, 0xD7)?; // ADC digital volume ~+12 dB (0xBF=0dB gave only ~2.7k peak)
 
         info!("ES8311 codec initialised (16 kHz, MCLK-from-SCLK, mic on, PA on)");
         Ok(codec)

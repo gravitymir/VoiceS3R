@@ -1,6 +1,7 @@
-//! WiFi provisioning portal: raise a SoftAP, serve a setup form, and return the
-//! credentials the user submits from their phone.
+//! WiFi provisioning portal: raise a SoftAP, serve a setup form (a list of up to
+//! 5 WiFi networks + the PC server address), and return what the user submits.
 
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,39 +12,75 @@ use esp_idf_svc::io::Write;
 use log::info;
 
 use crate::config;
-use crate::storage::StoredConfig;
+use crate::storage::{StoredConfig, WifiCred, MAX_WIFI};
 use crate::wifi::WifiManager;
 
-const PAGE: &str = r#"<!DOCTYPE html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
+const PAGE: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
 <title>ATOM VoiceS3R setup</title>
-<style>body{font-family:sans-serif;max-width:420px;margin:24px auto;padding:0 16px}
-label{display:block;margin:12px 0 4px;font-weight:600}
-input{width:100%;padding:10px;box-sizing:border-box;font-size:16px}
-button{margin-top:20px;width:100%;padding:12px;font-size:16px;background:#0a7;color:#fff;border:0;border-radius:6px}
-h2{color:#0a7}</style></head><body>
+<style>
+body{font-family:system-ui,sans-serif;max-width:440px;margin:16px auto;padding:0 16px;color:#222}
+h2{color:#0a7}
+label{display:block;margin:10px 0 3px;font-weight:600;font-size:14px}
+input{width:100%;padding:9px;box-sizing:border-box;font-size:16px;border:1px solid #bbb;border-radius:5px}
+.wblock{border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin:12px 0;background:#fafafa}
+.del{margin-top:8px;background:#c0392b;color:#fff;border:0;border-radius:5px;padding:7px 12px;font-size:14px}
+#addbtn{background:#2a6;color:#fff;border:0;border-radius:6px;padding:9px 14px;font-size:15px;margin:4px 0 16px}
+.connect{width:100%;padding:15px;font-size:18px;font-weight:700;background:#0a7;color:#fff;border:0;border-radius:8px;margin-top:18px}
+#msg{margin-top:14px;font-size:15px;color:#0a7;min-height:20px}
+</style></head><body>
 <h2>ATOM VoiceS3R setup</h2>
-<form id=f onsubmit="return false">
-<label>WiFi network (SSID)</label><input name=ssid placeholder="your-wifi" required>
-<label>WiFi password</label><input name=pass type=password placeholder="leave empty if open">
-<label>PC server (host:port)</label><input name=server value="__SERVER__">
-<label>Speaker volume (0-100)</label><input name=volume type=number min=0 max=100 value="__VOL__">
-<button type=submit onclick="save()">CONNECT</button>
-</form>
+<div id=wifis></div>
+<button type=button id=addbtn onclick="addWifi()">+ Add WiFi</button>
+<button type=button class=connect onclick="save()">CONNECT</button>
 <p id=msg></p>
 <script>
+var MAX=__MAX__;
+var DEF_SRV='__SERVER__';
+var nets=[{ssid:'',pass:'',server:DEF_SRV}];
+function esc(s){return (s||'').replace(/"/g,'&quot;');}
+function render(){
+  var c=document.getElementById('wifis');c.innerHTML='';
+  nets.forEach(function(n,i){
+    var d=document.createElement('div');d.className='wblock';
+    d.innerHTML='<label>WiFi '+(i+1)+' (SSID)</label>'+
+      '<input data-i="'+i+'" data-k="ssid" placeholder="network name" value="'+esc(n.ssid)+'">'+
+      '<label>Password</label>'+
+      '<input data-i="'+i+'" data-k="pass" type=password placeholder="leave empty if open" value="'+esc(n.pass)+'">'+
+      '<label>PC server (host:port)</label>'+
+      '<input data-i="'+i+'" data-k="server" placeholder="192.168.x.x:9000" value="'+esc(n.server)+'">'+
+      (i>0?'<button type=button class=del onclick="delWifi('+i+')">delete</button>':'');
+    c.appendChild(d);
+  });
+  c.querySelectorAll('input').forEach(function(inp){
+    inp.oninput=function(){nets[inp.dataset.i][inp.dataset.k]=inp.value;};
+  });
+  document.getElementById('addbtn').style.display=(nets.length>=MAX)?'none':'';
+}
+function addWifi(){if(nets.length<MAX){nets.push({ssid:'',pass:'',server:DEF_SRV});render();}}
+function delWifi(i){if(i>0){nets.splice(i,1);render();}}
 function save(){
-  var f=document.getElementById('f');
-  if(!f.ssid.value){f.ssid.focus();return;}
-  var body=new URLSearchParams(new FormData(f)).toString();
-  document.getElementById('msg').textContent='Saving and connecting...';
-  fetch('/connect',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+  var body=new URLSearchParams();var count=0;
+  nets.forEach(function(n){
+    if((n.ssid||'').trim()!==''){
+      body.append('ssid'+count,n.ssid);
+      body.append('pass'+count,n.pass);
+      body.append('srv'+count,n.server||DEF_SRV);
+      count++;
+    }
+  });
+  if(count===0){document.getElementById('msg').textContent='Add at least one WiFi network.';return;}
+  document.getElementById('msg').textContent='S3R is turning off this setup network and will try to connect to your WiFi list...';
+  fetch('/connect',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()})
     .then(function(r){return r.text();})
     .then(function(t){document.getElementById('msg').textContent=t;})
-    .catch(function(){document.getElementById('msg').textContent='Saved. Device is connecting to WiFi — this setup network will turn off.';});
+    .catch(function(){document.getElementById('msg').textContent='Saved. S3R is turning off the setup network and trying your WiFi list.';});
 }
+render();
 </script></body></html>"#;
 
-const DONE: &str = "Saved. Connecting to WiFi — this setup network will turn off. You can close this page.";
+const DONE: &str =
+    "Saved. S3R is turning off the setup network and connecting to your WiFi list. You can close this page.";
 
 /// Run the portal until the user submits credentials, then return them.
 pub fn run_portal(wifi: &mut WifiManager) -> Result<StoredConfig> {
@@ -56,13 +93,12 @@ pub fn run_portal(wifi: &mut WifiManager) -> Result<StoredConfig> {
     );
 
     let result: Arc<Mutex<Option<StoredConfig>>> = Arc::new(Mutex::new(None));
-
     let mut server = EspHttpServer::new(&HttpServerConfig::default())?;
 
     server.fn_handler::<anyhow::Error, _>("/", Method::Get, |req| {
         let html = PAGE
             .replace("__SERVER__", config::DEFAULT_SERVER)
-            .replace("__VOL__", &config::DEFAULT_VOLUME.to_string());
+            .replace("__MAX__", &MAX_WIFI.to_string());
         let mut resp = req.into_ok_response()?;
         resp.write_all(html.as_bytes())?;
         Ok(())
@@ -74,7 +110,7 @@ pub fn run_portal(wifi: &mut WifiManager) -> Result<StoredConfig> {
         let mut buf = [0u8; 256];
         loop {
             let n = req.read(&mut buf)?;
-            if n == 0 || body.len() > 2048 {
+            if n == 0 || body.len() > 4096 {
                 break;
             }
             body.extend_from_slice(&buf[..n]);
@@ -88,11 +124,10 @@ pub fn run_portal(wifi: &mut WifiManager) -> Result<StoredConfig> {
         Ok(())
     })?;
 
-    // Block until a submission arrives; dropping `server` stops it.
     loop {
         std::thread::sleep(Duration::from_millis(200));
         if let Some(cfg) = result.lock().unwrap().take() {
-            info!("received credentials for '{}'", cfg.ssid);
+            info!("received {} network(s)", cfg.wifis.len());
             return Ok(cfg);
         }
     }
@@ -101,32 +136,43 @@ pub fn run_portal(wifi: &mut WifiManager) -> Result<StoredConfig> {
 /// Parse `application/x-www-form-urlencoded` body into a config.
 fn parse_form(body: &[u8]) -> Option<StoredConfig> {
     let s = String::from_utf8_lossy(body);
-    let mut ssid = String::new();
-    let mut pass = String::new();
-    let mut server = config::DEFAULT_SERVER.to_string();
-    let mut volume = config::DEFAULT_VOLUME;
+    let pairs: Vec<(String, String)> = s
+        .split('&')
+        .map(|p| {
+            let mut it = p.splitn(2, '=');
+            (
+                it.next().unwrap_or("").to_string(),
+                url_decode(it.next().unwrap_or("")),
+            )
+        })
+        .collect();
+    let get = |key: &str| {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
 
-    for pair in s.split('&') {
-        let mut it = pair.splitn(2, '=');
-        let key = it.next().unwrap_or("");
-        let val = url_decode(it.next().unwrap_or(""));
-        match key {
-            "ssid" => ssid = val,
-            "pass" => pass = val,
-            "server" if !val.is_empty() => server = val,
-            "volume" => volume = val.parse().unwrap_or(config::DEFAULT_VOLUME).min(100),
-            _ => {}
+    let mut wifis = Vec::new();
+    for i in 0..MAX_WIFI {
+        if let Some(ssid) = get(&format!("ssid{i}")) {
+            if !ssid.is_empty() {
+                let pass = get(&format!("pass{i}")).unwrap_or_default();
+                let server = get(&format!("srv{i}"))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| config::DEFAULT_SERVER.to_string());
+                wifis.push(WifiCred { ssid, pass, server });
+            }
         }
     }
-
-    if ssid.is_empty() {
+    if wifis.is_empty() {
         return None;
     }
+
+    // Volume is voice-controlled now; default it (changed at runtime via "set volume").
     Some(StoredConfig {
-        ssid,
-        pass,
-        server,
-        volume,
+        wifis,
+        volume: config::DEFAULT_VOLUME,
     })
 }
 
@@ -139,9 +185,7 @@ fn url_decode(input: &str) -> String {
         match bytes[i] {
             b'+' => out.push(b' '),
             b'%' if i + 2 < bytes.len() => {
-                let hi = hex_val(bytes[i + 1]);
-                let lo = hex_val(bytes[i + 2]);
-                if let (Some(h), Some(l)) = (hi, lo) {
+                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
                     out.push(h << 4 | l);
                     i += 2;
                 } else {

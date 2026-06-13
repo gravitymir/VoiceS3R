@@ -1,14 +1,15 @@
 //! Push-to-talk audio streaming over a raw TCP socket.
 //!
 //! Protocol (one TCP connection per utterance):
-//!   1. Device connects to `SERVER_ADDR`.
+//!   1. Device connects to the configured server.
 //!   2. While the button is held, device streams 16 kHz/16-bit mono PCM up.
 //!   3. On release, device half-closes the write side (server sees EOF = end of
 //!      utterance), then transcribes -> LLM -> TTS on the PC.
-//!   4. Server streams the response PCM back; device plays it until EOF.
+//!   4. Server replies with a 1-byte control header (0xFF = no change, else a new
+//!      speaker volume 0..=100) followed by the response PCM, which the device
+//!      plays until EOF.
 //!
-//! Half-duplex keeps it simple and avoids mic/speaker echo. The classic ATOM
-//! Echo button-to-talk behaviour.
+//! Half-duplex keeps it simple and avoids mic/speaker echo.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -18,7 +19,12 @@ use esp_idf_svc::hal::gpio::{Gpio41, Input, PinDriver};
 use log::{info, warn};
 
 use crate::audio::Audio;
+use crate::codec::Codec;
 use crate::config;
+use crate::storage::Store;
+
+/// Response control byte meaning "leave the volume unchanged".
+const VOL_NO_CHANGE: u8 = 0xFF;
 
 /// Button is wired active-low (pressed = pin reads low).
 fn pressed(button: &PinDriver<'_, Gpio41, Input>) -> bool {
@@ -29,12 +35,14 @@ fn pressed(button: &PinDriver<'_, Gpio41, Input>) -> bool {
 pub fn run(
     audio: &mut Audio<'_>,
     button: &PinDriver<'_, Gpio41, Input>,
+    codec: &mut Codec<'_>,
+    store: &mut Store,
     server: &str,
 ) -> Result<()> {
     info!("Ready. Hold the button to talk to {}.", server);
     loop {
         if pressed(button) {
-            if let Err(e) = handle_utterance(audio, button, server) {
+            if let Err(e) = handle_utterance(audio, button, codec, store, server) {
                 warn!("utterance failed: {e:?}");
             }
             // Wait for release so one press == one utterance.
@@ -49,6 +57,8 @@ pub fn run(
 fn handle_utterance(
     audio: &mut Audio<'_>,
     button: &PinDriver<'_, Gpio41, Input>,
+    codec: &mut Codec<'_>,
+    store: &mut Store,
     server: &str,
 ) -> Result<()> {
     info!("connecting to {}", server);
@@ -68,7 +78,22 @@ fn handle_utterance(
     stream.flush()?;
     // Signal end-of-utterance to the server.
     stream.shutdown(Shutdown::Write)?;
-    info!("utterance sent ({sent} bytes), awaiting response", sent = sent);
+    info!("utterance sent ({sent} bytes), awaiting response");
+
+    // --- Control header: 1 byte. 0xFF = no change, else new volume 0..=100. ---
+    let mut ctrl = [0u8; 1];
+    if stream.read_exact(&mut ctrl).is_err() {
+        info!("no response from server");
+        return Ok(());
+    }
+    if ctrl[0] != VOL_NO_CHANGE {
+        let vol = ctrl[0].min(100);
+        info!("server set volume = {vol}");
+        if let Err(e) = codec.set_volume(vol) {
+            warn!("set_volume failed: {e:?}");
+        }
+        store.set_volume(vol).ok(); // persist across reboots
+    }
 
     // --- Downlink: play the response PCM (16 kHz mono) until the server closes. ---
     let mut total = 0usize;

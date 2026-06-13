@@ -62,49 +62,64 @@ fn app() -> Result<()> {
     )?;
     let mut codec = Codec::new(peripherals.i2c0, pins.gpio45, pins.gpio0, pins.gpio18)?;
 
+    // Boot speaker self-test: a beep at a known volume. If you hear this, the
+    // DAC + amplifier + speaker work regardless of the stored volume setting.
+    codec.set_volume(85)?;
+    audio.beep(1000, 250)?;
+    info!("boot beep played (volume 85)");
+
     let mut store = Store::new(nvs_part.clone())?;
     let mut wifi = WifiManager::new(peripherals.modem, sysloop, nvs_part)?;
 
-    // Try stored credentials first.
-    let mut active = match store.load()? {
-        Some(cfg) => match wifi.connect_sta(&cfg.ssid, &cfg.pass) {
-            Ok(ip) => {
-                info!("connected with stored creds, IP {ip}");
-                Some(cfg)
-            }
-            Err(e) => {
-                warn!("stored creds failed: {e:?}");
-                None
-            }
+    // Try stored networks first (each in turn until one connects). On success we
+    // keep the config and the server address of the network we connected to.
+    let mut active: Option<(storage::StoredConfig, String)> = None;
+    match store.load()? {
+        Some(cfg) => match connect_list(&mut wifi, &cfg) {
+            Some(server) => active = Some((cfg, server)),
+            None => warn!("no stored network reachable"),
         },
-        None => {
-            info!("no stored WiFi credentials");
-            None
-        }
-    };
+        None => info!("no stored WiFi credentials"),
+    }
 
-    // Provisioning loop until we successfully connect.
+    // Provisioning loop until one of the submitted networks connects.
     while active.is_none() {
         audio.play_pcm(config::PROMPT_AP)?;
         let cfg = provision::run_portal(&mut wifi)?;
         store.save(&cfg)?;
-        match wifi.connect_sta(&cfg.ssid, &cfg.pass) {
-            Ok(ip) => {
-                info!("provisioned and connected, IP {ip}");
-                active = Some(cfg);
-            }
-            Err(e) => warn!("could not connect with submitted creds: {e:?}"),
+        match connect_list(&mut wifi, &cfg) {
+            Some(server) => active = Some((cfg, server)),
+            None => warn!("none of the submitted networks connected; re-provisioning"),
         }
     }
 
-    let cfg = active.unwrap();
-    codec.set_volume(cfg.volume)?;
+    let (cfg, server) = active.unwrap();
+    let vol = cfg.volume.max(70); // floor so a stuck-low stored value can't mute us
+    info!("stored volume = {}, using {}", cfg.volume, vol);
+    codec.set_volume(vol)?;
     audio.play_pcm(config::PROMPT_READY)?;
+    info!("using PC server {server}");
 
     // Push-to-talk button (G41, active-low with internal pull-up).
     let mut button = PinDriver::input(pins.gpio41)?;
     button.set_pull(Pull::Up)?;
 
-    net::run(&mut audio, &button, &cfg.server)?;
+    net::run(&mut audio, &button, &mut codec, &mut store, &server)?;
     Ok(())
+}
+
+/// Try each stored network in order; on the first that connects, return the PC
+/// server address configured for that network.
+fn connect_list(wifi: &mut WifiManager, cfg: &storage::StoredConfig) -> Option<String> {
+    for w in &cfg.wifis {
+        info!("trying WiFi '{}'", w.ssid);
+        match wifi.connect_sta(&w.ssid, &w.pass) {
+            Ok(ip) => {
+                info!("connected to '{}', IP {ip}, server {}", w.ssid, w.server);
+                return Some(w.server.clone());
+            }
+            Err(e) => warn!("'{}' failed: {e:?}", w.ssid),
+        }
+    }
+    None
 }
