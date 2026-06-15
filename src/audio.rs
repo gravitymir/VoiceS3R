@@ -157,6 +157,22 @@ impl<'d> Audio<'d> {
         Ok(mi)
     }
 
+    /// Fill `out` with mono 16-bit mic samples (blocks until full). Used to feed
+    /// fixed-size frames to the wake-word AFE.
+    pub fn read_samples(&mut self, out: &mut [i16]) -> Result<()> {
+        let mut byte_buf = [0u8; config::AUDIO_CHUNK_BYTES];
+        let mut done = 0;
+        while done < out.len() {
+            let n = self.read_mono(&mut byte_buf)? / 2;
+            let take = n.min(out.len() - done);
+            for i in 0..take {
+                out[done + i] = i16::from_le_bytes([byte_buf[i * 2], byte_buf[i * 2 + 1]]);
+            }
+            done += take;
+        }
+        Ok(())
+    }
+
     /// Write MONO 16-bit PCM to the speaker (duplicated to L+R), no trailing silence.
     pub fn write_mono(&mut self, mono: &[u8]) -> Result<()> {
         let mut st = [0u8; STEREO_BYTES];

@@ -6,8 +6,10 @@ pub const AP_SSID: &str = "VoiceS3R";
 /// SoftAP password (WPA2, must be >= 8 chars).
 pub const AP_PASS: &str = "21212122";
 
+/// Default SSID pre-filled in the setup form's first WiFi block.
+pub const DEFAULT_SSID: &str = "home";
 /// Default value pre-filled in the setup form for the PC server `host:port`.
-pub const DEFAULT_SERVER: &str = "192.168.1.50:9000";
+pub const DEFAULT_SERVER: &str = "192.168.8.100:9000";
 /// Default speaker volume (0..=100).
 pub const DEFAULT_VOLUME: u8 = 75;
 

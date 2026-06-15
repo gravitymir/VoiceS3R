@@ -17,6 +17,7 @@ mod config;
 mod net;
 mod provision;
 mod storage;
+mod wakeword;
 mod wifi;
 
 use anyhow::Result;
@@ -62,11 +63,14 @@ fn app() -> Result<()> {
     )?;
     let mut codec = Codec::new(peripherals.i2c0, pins.gpio45, pins.gpio0, pins.gpio18)?;
 
-    // Boot speaker self-test: a beep at a known volume. If you hear this, the
-    // DAC + amplifier + speaker work regardless of the stored volume setting.
+    // Boot speaker self-test: a beep at a known volume.
     codec.set_volume(85)?;
     audio.beep(1000, 250)?;
     info!("boot beep played (volume 85)");
+
+    // Button (G41) — used to trigger a command and to exit PC-speaker mode.
+    let mut button = PinDriver::input(pins.gpio41)?;
+    button.set_pull(Pull::Up)?;
 
     let mut store = Store::new(nvs_part.clone())?;
     let mut wifi = WifiManager::new(peripherals.modem, sysloop, nvs_part)?;
@@ -100,11 +104,18 @@ fn app() -> Result<()> {
     audio.play_pcm(config::PROMPT_READY)?;
     info!("using PC server {server}");
 
-    // Push-to-talk button (G41, active-low with internal pull-up).
-    let mut button = PinDriver::input(pins.gpio41)?;
-    button.set_pull(Pull::Up)?;
+    // Bring up the on-device wake word, then run the hands-free assistant loop.
+    info!("initializing wake word...");
+    let mut wakeword = wakeword::WakeWord::new()?;
 
-    net::run(&mut audio, &button, &mut codec, &mut store, &server)?;
+    net::run_voice(
+        &mut audio,
+        &button,
+        &mut wakeword,
+        &mut codec,
+        &mut store,
+        &server,
+    )?;
     Ok(())
 }
 

@@ -37,7 +37,8 @@ input{width:100%;padding:9px;box-sizing:border-box;font-size:16px;border:1px sol
 <script>
 var MAX=__MAX__;
 var DEF_SRV='__SERVER__';
-var nets=[{ssid:'',pass:'',server:DEF_SRV}];
+var DEF_SSID='__SSID__';
+var nets=[{ssid:DEF_SSID,pass:'',server:DEF_SRV}];
 function esc(s){return (s||'').replace(/"/g,'&quot;');}
 function render(){
   var c=document.getElementById('wifis');c.innerHTML='';
@@ -98,6 +99,7 @@ pub fn run_portal(wifi: &mut WifiManager) -> Result<StoredConfig> {
     server.fn_handler::<anyhow::Error, _>("/", Method::Get, |req| {
         let html = PAGE
             .replace("__SERVER__", config::DEFAULT_SERVER)
+            .replace("__SSID__", config::DEFAULT_SSID)
             .replace("__MAX__", &MAX_WIFI.to_string());
         let mut resp = req.into_ok_response()?;
         resp.write_all(html.as_bytes())?;

@@ -11,6 +11,10 @@ harness = false # do not use the built-in cargo test harness -> resolve rust-ana
 
 [profile.release]
 opt-level = "s"
+# One codegen unit -> a single object file for our crate, which shortens the
+# linker command line. On Windows the esp-idf link args sit right at the 32 KB
+# CreateProcess limit; fewer object-file args keeps ldproxy under it.
+codegen-units = 1
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash
@@ -27,3 +31,10 @@ es8311 = "0.1"
 
 [build-dependencies]
 embuild = "0.33"
+
+# Pull Espressif's ESP-SR (on-device wake word / WakeNet) into the ESP-IDF build
+# and generate Rust bindings for it, accessible as `esp_idf_svc::sys::esp_sr`.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp-sr", version = "^2.0.0" }
+bindings_header = "esp_sr_bindings.h"
+bindings_module = "esp_sr"

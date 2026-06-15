@@ -16,3 +16,17 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 
 # Keep logs readable over the USB serial monitor.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ESP-SR wake word: the "Sophia" WakeNet9 model, read from the flash
+# "model" partition. Needs PSRAM (above) and a custom partition table (below).
+CONFIG_SR_WN_WN9_SOPHIA_TTS=y
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 8MB flash (the model + app + nvs partitions overflow the default 2MB).
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Custom partition table that adds the speech-model partition. Absolute path:
+# ESP-IDF resolves this relative to the (generated) build dir, not our crate.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="C:/Users/gravi/Documents/rust/ATOMVoiceS3R/partitions.csv"
