@@ -1,10 +1,15 @@
 # VoiceS3R
 
-Rust firmware for the **M5Stack ATOM VoiceS3R** (SKU C126-ECHO) — a push-to-talk
-voice terminal. Hold the button to record, and the device streams your voice over
-WiFi to a PC, then plays back the spoken reply.
+Rust firmware for the **M5Stack ATOM VoiceS3R** (SKU C126-ECHO) — a hands-free
+voice assistant. It listens for the on-device wake word **"Sophia"**
+(ESP-SR / WakeNet9, runs locally) — or a button press — then streams your voice
+over WiFi to a PC and plays back the spoken reply. The PC side does the STT,
+the AI brain, and the TTS.
 
-Pairs with the PC server: **[ServerVoiceS3R](https://github.com/gravitymir/ServerVoiceS3R)**.
+**Pairs with the PC server — install & run it from
+[ServerVoiceS3R](https://github.com/gravitymir/ServerVoiceS3R)** (Whisper STT →
+Claude/OpenAI brain → OpenAI/Windows TTS; also a "skills" agent, WiFi speaker
+mode, and a hands-free voice coding mode). See that repo's README for setup.
 
 ```
 ATOM VoiceS3R  ──(hold button)── 16 kHz mono PCM ──TCP──▶  PC server
@@ -46,8 +51,10 @@ ATOM VoiceS3R  ──(hold button)── 16 kHz mono PCM ──TCP──▶  PC 
 3. If there are no credentials / the connection fails: play the "access point"
    prompt, raise the **`VoiceS3R`** SoftAP + a setup web page, and wait for the
    user to submit WiFi + the PC server address.
-4. Play "ready for work", then run push-to-talk: hold the button to stream mic
-   audio to the PC and play the response.
+4. Play "ready for work", then run the assistant loop: on the wake word
+   **"Sophia"** (or a button press) it beeps, records your command until you stop
+   speaking, streams it to the PC, and plays the spoken reply. The server can also
+   set volume or enter WiFi speaker mode via a 1-byte control header.
 
 ## Provisioning
 
@@ -108,9 +115,10 @@ cargo run --release --bin i2cscan
 | `src/provision.rs`  | SoftAP setup portal |
 | `src/codec.rs`      | ES8311 init (I2C) + PA + registers |
 | `src/audio.rs`      | full-duplex I2S, mono↔stereo, beep, mic level |
-| `src/net.rs`        | push-to-talk TCP streaming |
+| `src/wakeword.rs`   | on-device "Sophia" wake word (ESP-SR / WakeNet9 AFE) |
+| `src/net.rs`        | wake-word/button assistant loop + TCP streaming + speaker mode |
 | `src/control.rs`    | diagnostic web panel (bring-up) |
-| `assets/*.pcm`      | embedded 16 kHz TTS prompts |
+| `assets/*.pcm`      | embedded 16 kHz TTS prompts (boot / setup) |
 
 ## License
 
