@@ -128,7 +128,7 @@ fn run_turn(
 /// then play the response. Returns Ok(true) if the server asked for speaker mode.
 ///
 /// Endpointing: once the mic energy crosses a speech threshold, the turn ends
-/// after ~800 ms of trailing silence. Caps guard against no-speech / runaways.
+/// after ~1.5 s of trailing silence. Caps guard against no-speech / runaways.
 fn handle_command(
     audio: &mut Audio<'_>,
     codec: &mut Codec<'_>,
@@ -136,9 +136,9 @@ fn handle_command(
     server: &str,
 ) -> Result<bool> {
     const FRAME_MS: usize = 32; // read_mono returns ~512 samples = 32 ms
-    const MAX_FRAMES: usize = 9000 / FRAME_MS; // ~9 s hard cap
+    const MAX_FRAMES: usize = 30000 / FRAME_MS; // ~30 s hard cap (long dictation)
     const START_TIMEOUT: usize = 4000 / FRAME_MS; // give up if silent ~4 s
-    const SILENCE_END: usize = 800 / FRAME_MS; // ~800 ms trailing silence ends turn
+    const SILENCE_END: usize = 1500 / FRAME_MS; // ~1.5 s trailing silence ends turn
     const SPEECH_PEAK: i32 = 350; // quiet floor ~40, speech ~1000+
 
     info!("connecting to {server}");
