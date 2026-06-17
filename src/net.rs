@@ -26,15 +26,46 @@ use crate::audio::Audio;
 use crate::codec::Codec;
 use crate::config;
 use crate::storage::Store;
-use crate::wakeword::WakeWord;
+use crate::wakeword::{WakeWord, PERSONA_SOPHIA};
 
 const VOL_NO_CHANGE: u8 = 0xFF;
 const ENTER_SPEAKER: u8 = 0xFE;
+/// Server→device reply byte: stay in continuous transcribe mode (record the next
+/// utterance immediately, no wake word). The server tracks the mode; the device
+/// keeps looping while it keeps receiving this byte.
+const TRANSCRIBE: u8 = 0xFD;
+/// Device→server header bit (OR'd into the persona byte): "button pressed — leave
+/// transcribe mode". Sent once, with an empty utterance, when the user presses the
+/// button during transcribe mode so the server can clear its state.
+const TRANSCRIBE_EXIT: u8 = 0x80;
+/// Server→device reply bytes that start a STREAMING transcribe session: the device
+/// opens one long-lived connection to the transcribe-stream port and pushes the
+/// mic continuously (the server segments + transcribes). LOCAL = on-PC Whisper,
+/// EXTERNAL = OpenAI Realtime. The byte also tells the device which backend to
+/// announce in the stream header.
+const STREAM_LOCAL: u8 = 0xFC;
+const STREAM_EXTERNAL: u8 = 0xFB;
 /// Control bytes 128..=228 mean: set volume (byte − 128) AND enter speaker mode
 /// — lets one response do a compound "volume N and speaker mode" command.
 const SPEAKER_VOL_BASE: u8 = 128;
+
+/// What the server's control byte asks the device to do after a turn.
+enum Reply {
+    /// Normal turn — return to wake-word listening.
+    Done,
+    /// Enter WiFi speaker mode.
+    Speaker,
+    /// Continuous transcribe — record the next utterance with no wake word.
+    Transcribe,
+    /// Open a streaming transcribe session (true = external/Realtime, false = local).
+    Stream(bool),
+}
 /// TCP port of the PC audio stream server (`pc_speaker`).
 const SPEAKER_PORT: u16 = 9001;
+/// TCP port the device streams the mic to for streaming transcription.
+const TRANSCRIBE_STREAM_PORT: u16 = 9002;
+/// Device→server stream header bit: external (Realtime) backend (else local).
+const STREAM_BACKEND_EXTERNAL: u8 = 0x80;
 
 /// Button is wired active-low (pressed = pin reads low).
 fn pressed(button: &PinDriver<'_, Gpio41, Input>) -> bool {
@@ -61,17 +92,18 @@ pub fn run_voice(
 ) -> Result<()> {
     let host = server.split(':').next().unwrap_or(server);
     let speaker_addr = format!("{host}:{SPEAKER_PORT}");
+    let transcribe_addr = format!("{host}:{TRANSCRIBE_STREAM_PORT}");
 
-    info!("Voice assistant ready. Say 'Hi ESP' (\"hi ee-ess-pee\"), or press the button.");
+    info!("Voice assistant ready. Say 'Sophia' or 'Jarvis', or press the button.");
     let mut frame = vec![0i16; wakeword.frame_len()];
     let mut hb = 0u32;
     loop {
         // Manual trigger: a short button press is equivalent to the wake word
-        // (a fallback for when the wake word isn't recognised).
+        // (a fallback). It uses the default persona (Sophia).
         if pressed(button) {
             wait_release(button);
             info!("button trigger");
-            run_turn(audio, button, codec, store, server, &speaker_addr)?;
+            run_turn(audio, button, codec, store, server, &speaker_addr, &transcribe_addr, PERSONA_SOPHIA)?;
             continue;
         }
 
@@ -83,9 +115,8 @@ pub fn run_voice(
             info!("listening for wake word...");
         }
 
-        if wakeword.process(&frame) {
-            info!("wake word detected");
-            run_turn(audio, button, codec, store, server, &speaker_addr)?;
+        if let Some(persona) = wakeword.process(&frame) {
+            run_turn(audio, button, codec, store, server, &speaker_addr, &transcribe_addr, persona)?;
         }
     }
 }
@@ -99,25 +130,61 @@ fn run_turn(
     store: &mut Store,
     server: &str,
     speaker_addr: &str,
+    transcribe_addr: &str,
+    persona: u8,
 ) -> Result<()> {
+    // In continuous transcribe mode the device records utterance after utterance
+    // with no wake word (the server tracks the mode and keeps replying TRANSCRIBE).
+    // Exit is the button: it notifies the server so it can clear its state.
+    let mut transcribing = false;
     loop {
-        audio.beep(1200, 60)?; // short ack chirp: "I'm listening, speak now"
-
-        let enter_speaker = matches!(handle_command(audio, codec, store, server), Ok(true));
-        if !enter_speaker {
-            break; // a normal command/answer — return to wake-word listening
+        // In transcribe mode a button press exits: tell the server, then stop.
+        if transcribing && pressed(button) {
+            wait_release(button);
+            if let Err(e) = send_transcribe_exit(audio, server, persona) {
+                warn!("transcribe exit notify failed: {e:?}");
+            }
+            break;
+        }
+        // Ack chirp ("I'm listening, speak now") — but NOT during continuous
+        // transcribe: the beep bleeds into the mic and gets transcribed as "Beep"
+        // on silent turns. Dictation is continuous, so no per-sentence cue needed.
+        if !transcribing {
+            audio.beep(1200, 60)?;
         }
 
-        // Speaker mode: play the PC audio stream until the button is pressed. A
-        // button press both EXITS speaker mode and immediately starts the next
-        // command turn (chirp + listen); a closed stream returns to listening.
-        match speaker_session(audio, button, speaker_addr) {
-            Ok(true) => continue, // button -> loop back: chirp + record a command
-            Ok(false) => break,   // stream ended
-            Err(e) => {
-                warn!("speaker mode failed: {e:?}");
+        match handle_command(audio, codec, store, server, persona).unwrap_or(Reply::Done) {
+            // Enter / stay in continuous transcribe: record the next utterance
+            // immediately with no wake word (exit only via the button, above).
+            Reply::Transcribe => {
+                transcribing = true;
+                continue;
+            }
+            // Speaker mode: play the PC audio stream until the button is pressed.
+            // A button press both EXITS speaker mode and immediately starts the
+            // next command turn (chirp + listen); a closed stream returns to idle.
+            Reply::Speaker => {
+                transcribing = false;
+                match speaker_session(audio, button, speaker_addr) {
+                    Ok(true) => continue, // button -> loop back: chirp + record a command
+                    Ok(false) => break,   // stream ended
+                    Err(e) => {
+                        warn!("speaker mode failed: {e:?}");
+                        break;
+                    }
+                }
+            }
+            // Streaming transcribe: open one long-lived connection and push the
+            // mic continuously until the button is pressed, then back to idle.
+            Reply::Stream(external) => {
+                if let Err(e) = transcribe_stream_session(audio, button, transcribe_addr, persona, external) {
+                    warn!("transcribe stream failed: {e:?}");
+                }
                 break;
             }
+            // A normal command/answer, or the server left transcribe mode (idle
+            // timeout) — stop the turn (back to wake-word listening).
+            Reply::Done => break,
         }
     }
     info!("resuming wake-word listening");
@@ -125,7 +192,7 @@ fn run_turn(
 }
 
 /// Record the spoken command (energy-based endpointing), stream it to the PC,
-/// then play the response. Returns Ok(true) if the server asked for speaker mode.
+/// then play the response. Returns the `Reply` the server's control byte asks for.
 ///
 /// Endpointing: once the mic energy crosses a speech threshold, the turn ends
 /// after ~1.5 s of trailing silence. Caps guard against no-speech / runaways.
@@ -134,7 +201,8 @@ fn handle_command(
     codec: &mut Codec<'_>,
     store: &mut Store,
     server: &str,
-) -> Result<bool> {
+    persona: u8,
+) -> Result<Reply> {
     const FRAME_MS: usize = 32; // read_mono returns ~512 samples = 32 ms
     const MAX_FRAMES: usize = 30000 / FRAME_MS; // ~30 s hard cap (long dictation)
     const START_TIMEOUT: usize = 4000 / FRAME_MS; // give up if silent ~4 s
@@ -144,6 +212,11 @@ fn handle_command(
     info!("connecting to {server}");
     let mut stream = TcpStream::connect(server)?;
     stream.set_nodelay(true).ok();
+
+    // Send the persona id (which wake word fired) as the FIRST byte, before any
+    // audio. The server reads exactly this one byte, then the PCM — keeping the
+    // 16-bit samples aligned. (Must match the server's read order.)
+    stream.write_all(&[persona])?;
 
     let mut buf = [0u8; config::AUDIO_CHUNK_BYTES];
 
@@ -211,14 +284,26 @@ fn handle_command(
     let mut ctrl = [0u8; 1];
     if stream.read_exact(&mut ctrl).is_err() {
         info!("no response from server");
-        return Ok(false);
+        return Ok(Reply::Done);
     }
-    let mut enter_speaker = false;
+    let mut reply = Reply::Done;
     match ctrl[0] {
         VOL_NO_CHANGE => {}
         ENTER_SPEAKER => {
-            enter_speaker = true;
+            reply = Reply::Speaker;
             info!("server requested speaker mode");
+        }
+        TRANSCRIBE => {
+            reply = Reply::Transcribe;
+            info!("server: continuous transcribe — listening for next utterance");
+        }
+        STREAM_LOCAL => {
+            reply = Reply::Stream(false);
+            info!("server: streaming transcribe (local)");
+        }
+        STREAM_EXTERNAL => {
+            reply = Reply::Stream(true);
+            info!("server: streaming transcribe (external/Realtime)");
         }
         // Compound: set volume AND enter speaker mode.
         v if v >= SPEAKER_VOL_BASE => {
@@ -228,7 +313,7 @@ fn handle_command(
                 warn!("set_volume failed: {e:?}");
             }
             store.set_volume(vol).ok();
-            enter_speaker = true;
+            reply = Reply::Speaker;
         }
         v => {
             let vol = v.min(100);
@@ -251,7 +336,87 @@ fn handle_command(
     }
     audio.write_silence().ok();
     info!("played {total} bytes of response audio");
-    Ok(enter_speaker)
+    Ok(reply)
+}
+
+/// Tell the server to leave transcribe mode (the user pressed the button). Sends
+/// one header byte with the exit marker and an empty utterance, then plays the
+/// server's short spoken confirmation. Best-effort.
+fn send_transcribe_exit(audio: &mut Audio<'_>, server: &str, persona: u8) -> Result<()> {
+    info!("transcribe: button exit -> notifying server");
+    let mut stream = TcpStream::connect(server)?;
+    stream.set_nodelay(true).ok();
+    stream.write_all(&[persona | TRANSCRIBE_EXIT])?; // header only, no audio
+    stream.shutdown(Shutdown::Write)?;
+
+    // Play the confirmation ("Transcribe mode off."), if any.
+    let mut ctrl = [0u8; 1];
+    if stream.read_exact(&mut ctrl).is_ok() {
+        let mut buf = [0u8; config::AUDIO_CHUNK_BYTES];
+        loop {
+            let n = stream.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            audio.write_mono(&buf[..n])?;
+        }
+        audio.write_silence().ok();
+    }
+    Ok(())
+}
+
+/// Streaming transcribe session: open one long-lived connection to the
+/// transcribe-stream port and push the mic continuously (16 kHz mono PCM) until
+/// the button is pressed. The server segments the stream and transcribes it —
+/// there are NO per-sentence reconnects or gaps, so nothing is lost. `external`
+/// selects the server's backend (OpenAI Realtime vs local Whisper).
+fn transcribe_stream_session(
+    audio: &mut Audio<'_>,
+    button: &PinDriver<'_, Gpio41, Input>,
+    addr: &str,
+    persona: u8,
+    external: bool,
+) -> Result<()> {
+    info!("transcribe stream: connecting to {addr} (external={external})");
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_nodelay(true).ok();
+    // Header: low bits = persona, high bit = backend (external/Realtime vs local).
+    let header = persona | if external { STREAM_BACKEND_EXTERNAL } else { 0 };
+    stream.write_all(&[header])?;
+
+    let mut buf = [0u8; config::AUDIO_CHUNK_BYTES];
+
+    // Drain the "on" prompt's echo so the first segment isn't the TTS tail.
+    for _ in 0..(400 / 32) {
+        let n = audio.read_mono(&mut buf)?;
+        let mut peak = 0i32;
+        for s in buf[..n].chunks_exact(2) {
+            let v = (i16::from_le_bytes([s[0], s[1]]) as i32).abs();
+            if v > peak {
+                peak = v;
+            }
+        }
+        if peak < 350 {
+            break;
+        }
+    }
+
+    info!("transcribe stream: streaming mic (press button to stop)");
+    loop {
+        if pressed(button) {
+            wait_release(button);
+            break;
+        }
+        let n = audio.read_mono(&mut buf)?;
+        if n > 0 && stream.write_all(&buf[..n]).is_err() {
+            info!("transcribe stream: server closed the connection");
+            break;
+        }
+    }
+    stream.shutdown(Shutdown::Both).ok();
+    audio.beep(700, 90)?; // low "off" cue
+    info!("transcribe stream: ended");
+    Ok(())
 }
 
 /// Play the PC audio stream until the button is pressed or the stream closes.

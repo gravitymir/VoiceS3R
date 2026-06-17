@@ -17,9 +17,11 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 # Keep logs readable over the USB serial monitor.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# ESP-SR wake word: the "Sophia" WakeNet9 model, read from the flash
-# "model" partition. Needs PSRAM (above) and a custom partition table (below).
+# ESP-SR dual wake word: the "Sophia" + "Jarvis" WakeNet9 models, read from the
+# flash "model" partition. Both pack into srmodels.bin; the AFE runs both and
+# reports which one fired. Needs PSRAM (above) and a custom partition table.
 CONFIG_SR_WN_WN9_SOPHIA_TTS=y
+CONFIG_SR_WN_WN9_JARVIS_TTS=y
 CONFIG_MODEL_IN_FLASH=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
