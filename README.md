@@ -12,8 +12,8 @@ command needed.
 [ServerVoiceS3R](https://github.com/gravitymir/ServerVoiceS3R)** (Whisper STT →
 Claude/OpenAI brain → OpenAI/Windows TTS; also a "skills" agent, WiFi speaker
 mode, a hands-free voice coding mode, and a **continuous dictation / transcribe**
-mode — local in-process whisper.cpp or OpenAI Realtime, exit by button). See that
-repo's README for setup.
+mode — OpenAI Realtime, optionally typed straight into the focused field, exit by
+button). See that repo's README for setup.
 
 ```
 ATOM VoiceS3R  ──(hold button)── 16 kHz mono PCM ──TCP──▶  PC server
