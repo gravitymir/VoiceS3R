@@ -22,5 +22,6 @@ pub const AUDIO_CHUNK_BYTES: usize = 1024;
 
 /// Spoken prompt played when entering provisioning (AP) mode. 16 kHz mono PCM.
 pub const PROMPT_AP: &[u8] = include_bytes!("../assets/prompt_ap.pcm");
-/// Spoken prompt played once WiFi connects. 16 kHz mono PCM.
+/// Spoken prompt played once WiFi connects: "Соединение установлено, готова к
+/// работе." (Russian, voice nova). 16 kHz mono PCM.
 pub const PROMPT_READY: &[u8] = include_bytes!("../assets/prompt_ready.pcm");

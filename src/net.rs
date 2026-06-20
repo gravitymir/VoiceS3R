@@ -59,6 +59,9 @@ enum Reply {
     Transcribe,
     /// Open a streaming transcribe session (true = external/Realtime, false = local).
     Stream(bool),
+    /// Button pressed during a keep-listening (transcribe/translate/etc.) turn —
+    /// leave the mode and notify the server.
+    ButtonExit,
 }
 /// TCP port of the PC audio stream server (`pc_speaker`).
 const SPEAKER_PORT: u16 = 9001;
@@ -153,7 +156,19 @@ fn run_turn(
             audio.beep(1200, 60)?;
         }
 
-        match handle_command(audio, codec, store, server, persona).unwrap_or(Reply::Done) {
+        match handle_command(audio, codec, store, server, persona, button, transcribing)
+            .unwrap_or(Reply::Done)
+        {
+            // Button tapped mid-turn while in a keep-listening mode: notify the
+            // server so it clears its state, then stop. (Caught inside the
+            // recording/playback loop, so a short tap isn't missed.)
+            Reply::ButtonExit => {
+                wait_release(button);
+                if let Err(e) = send_transcribe_exit(audio, server, persona) {
+                    warn!("transcribe exit notify failed: {e:?}");
+                }
+                break;
+            }
             // Enter / stay in continuous transcribe: record the next utterance
             // immediately with no wake word (exit only via the button, above).
             Reply::Transcribe => {
@@ -202,6 +217,8 @@ fn handle_command(
     store: &mut Store,
     server: &str,
     persona: u8,
+    button: &PinDriver<'_, Gpio41, Input>,
+    transcribing: bool,
 ) -> Result<Reply> {
     const FRAME_MS: usize = 32; // read_mono returns ~512 samples = 32 ms
     const MAX_FRAMES: usize = 30000 / FRAME_MS; // ~30 s hard cap (long dictation)
@@ -243,6 +260,14 @@ fn handle_command(
     let mut frames = 0usize;
     let mut sent = 0usize;
     loop {
+        // In a keep-listening mode, a button tap while we wait for / record the
+        // next utterance means "leave the mode" — catch it here so a short press
+        // isn't lost (the run_turn loop only re-checks the button between turns).
+        if transcribing && pressed(button) {
+            info!("button pressed during transcribe turn — exiting mode");
+            let _ = stream.shutdown(Shutdown::Both);
+            return Ok(Reply::ButtonExit);
+        }
         let n = audio.read_mono(&mut buf)?;
         if n == 0 {
             continue;
@@ -327,6 +352,12 @@ fn handle_command(
 
     let mut total = 0usize;
     loop {
+        // Allow a button tap to interrupt playback and leave a keep-listening mode.
+        if transcribing && pressed(button) {
+            info!("button pressed during reply playback — exiting mode");
+            let _ = stream.shutdown(Shutdown::Both);
+            return Ok(Reply::ButtonExit);
+        }
         let n = stream.read(&mut buf)?;
         if n == 0 {
             break;

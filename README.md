@@ -55,11 +55,19 @@ ATOM VoiceS3R  ──(hold button)── 16 kHz mono PCM ──TCP──▶  PC 
 3. If there are no credentials / the connection fails: play the "access point"
    prompt, raise the **`VoiceS3R`** SoftAP + a setup web page, and wait for the
    user to submit WiFi + the PC server address.
-4. Play "ready for work", then run the assistant loop: on a wake word
+4. Play the **"connected, ready" greeting** — a Russian voice prompt
+   *"Соединение установлено, готова к работе"* (Sophia's `nova` voice), embedded as
+   `assets/prompt_ready.pcm` — then run the assistant loop: on a wake word
    **"Sophia"** / **"Jarvis"** (or a button press) it beeps, records your command
    until you stop speaking, sends a 1-byte persona id (which name fired) + the
    PCM to the PC, and plays the spoken reply. The server can also set volume or
    enter WiFi speaker mode via a 1-byte control header.
+
+> **Greeting prompt.** The boot greeting is a pre-rendered 16 kHz mono PCM clip
+> (`assets/prompt_ready.pcm`), generated with OpenAI TTS (voice `nova`) and
+> converted via `ffmpeg -ar 16000 -ac 1 -f s16le`. To change it, regenerate the
+> clip and rebuild. In any **keep-listening** mode (transcribe / translate / chat /
+> coding / hacker) a short **button** press leaves the mode immediately.
 
 ## Provisioning
 
