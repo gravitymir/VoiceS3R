@@ -25,3 +25,7 @@ pub const PROMPT_AP: &[u8] = include_bytes!("../assets/prompt_ap.pcm");
 /// Spoken prompt played once WiFi connects: "Соединение установлено, готова к
 /// работе." (Russian, voice nova). 16 kHz mono PCM.
 pub const PROMPT_READY: &[u8] = include_bytes!("../assets/prompt_ready.pcm");
+/// Soft, seamlessly-looping "thinking" cue (2 s, 16 kHz mono PCM). Played while
+/// the device waits for the server's reply so it isn't dead-silent for the few
+/// seconds the brain (Claude CLI) takes to respond.
+pub const PROMPT_THINKING: &[u8] = include_bytes!("../assets/prompt_thinking.pcm");

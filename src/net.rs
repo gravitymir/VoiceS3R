@@ -140,14 +140,22 @@ fn run_turn(
     // with no wake word (the server tracks the mode and keeps replying TRANSCRIBE).
     // Exit is the button: it notifies the server so it can clear its state.
     let mut transcribing = false;
+    // After the button stops a mode we don't jump straight home — we listen for the
+    // next command right away (no wake word), so the button doubles as "switch
+    // mode". If that listen hears nothing within a short window, THEN we go home.
+    // `quick_listen` marks such a post-stop turn (2 s no-speech window vs 4 s).
+    let mut quick_listen = false;
     loop {
-        // In transcribe mode a button press exits: tell the server, then stop.
+        // Button while in a keep-listening mode: clear the server mode, then listen
+        // for a new command immediately.
         if transcribing && pressed(button) {
             wait_release(button);
             if let Err(e) = send_transcribe_exit(audio, server, persona) {
                 warn!("transcribe exit notify failed: {e:?}");
             }
-            break;
+            transcribing = false;
+            quick_listen = true;
+            continue;
         }
         // Ack chirp ("I'm listening, speak now") — but NOT during continuous
         // transcribe: the beep bleeds into the mic and gets transcribed as "Beep"
@@ -156,18 +164,25 @@ fn run_turn(
             audio.beep(1200, 60)?;
         }
 
-        match handle_command(audio, codec, store, server, persona, button, transcribing)
+        // Post-stop listen uses a short no-speech window so silence quickly falls
+        // through to home; a normal / first turn gives the user longer.
+        let start_ms = if quick_listen { 2000 } else { 4000 };
+        quick_listen = false;
+
+        match handle_command(audio, codec, store, server, persona, button, transcribing, start_ms)
             .unwrap_or(Reply::Done)
         {
-            // Button tapped mid-turn while in a keep-listening mode: notify the
-            // server so it clears its state, then stop. (Caught inside the
-            // recording/playback loop, so a short tap isn't missed.)
+            // Button tapped mid-turn while in a keep-listening mode: clear the
+            // server mode, then listen for the next command immediately (no wake
+            // word). Caught inside the record/playback loop so a short tap isn't lost.
             Reply::ButtonExit => {
                 wait_release(button);
                 if let Err(e) = send_transcribe_exit(audio, server, persona) {
                     warn!("transcribe exit notify failed: {e:?}");
                 }
-                break;
+                transcribing = false;
+                quick_listen = true;
+                continue;
             }
             // Enter / stay in continuous transcribe: record the next utterance
             // immediately with no wake word (exit only via the button, above).
@@ -176,13 +191,16 @@ fn run_turn(
                 continue;
             }
             // Speaker mode: play the PC audio stream until the button is pressed.
-            // A button press both EXITS speaker mode and immediately starts the
-            // next command turn (chirp + listen); a closed stream returns to idle.
+            // A button press both EXITS speaker mode and immediately listens for the
+            // next command; a closed stream returns to idle.
             Reply::Speaker => {
                 transcribing = false;
                 match speaker_session(audio, button, speaker_addr) {
-                    Ok(true) => continue, // button -> loop back: chirp + record a command
-                    Ok(false) => break,   // stream ended
+                    Ok(true) => {
+                        quick_listen = true; // button stopped audio -> listen for a command
+                        continue;
+                    }
+                    Ok(false) => break, // stream ended
                     Err(e) => {
                         warn!("speaker mode failed: {e:?}");
                         break;
@@ -197,8 +215,8 @@ fn run_turn(
                 }
                 break;
             }
-            // A normal command/answer, or the server left transcribe mode (idle
-            // timeout) — stop the turn (back to wake-word listening).
+            // A normal command/answer (or a silent post-stop listen) — go home
+            // (back to wake-word listening).
             Reply::Done => break,
         }
     }
@@ -219,10 +237,11 @@ fn handle_command(
     persona: u8,
     button: &PinDriver<'_, Gpio41, Input>,
     transcribing: bool,
+    start_timeout_ms: usize,
 ) -> Result<Reply> {
     const FRAME_MS: usize = 32; // read_mono returns ~512 samples = 32 ms
     const MAX_FRAMES: usize = 30000 / FRAME_MS; // ~30 s hard cap (long dictation)
-    const START_TIMEOUT: usize = 4000 / FRAME_MS; // give up if silent ~4 s
+    let start_timeout = start_timeout_ms / FRAME_MS; // give up if silent this long
     const SILENCE_END: usize = 1500 / FRAME_MS; // ~1.5 s trailing silence ends turn
     const SPEECH_PEAK: i32 = 350; // quiet floor ~40, speech ~1000+
 
@@ -293,9 +312,15 @@ fn handle_command(
         if spoke && silence >= SILENCE_END {
             break;
         }
-        if !spoke && frames >= START_TIMEOUT {
-            info!("no speech detected, ending turn");
-            break;
+        if !spoke && frames >= start_timeout {
+            info!("no speech detected ({start_timeout_ms} ms)");
+            if !transcribing {
+                // Nothing said on a normal / post-button listen → go straight home
+                // (don't ship a few seconds of silence to the server).
+                stream.shutdown(Shutdown::Both).ok();
+                return Ok(Reply::Done);
+            }
+            break; // keep-listening mode: send the silence (server keeps / auto-exits)
         }
         if frames >= MAX_FRAMES {
             break;
@@ -306,10 +331,15 @@ fn handle_command(
     info!("command sent ({sent} bytes), awaiting response");
 
     // --- Control header + response playback. ---
+    // Await the 1-byte control header, playing a soft "thinking" loop meanwhile so
+    // the device isn't dead-silent during the brain's few seconds of work.
     let mut ctrl = [0u8; 1];
-    if stream.read_exact(&mut ctrl).is_err() {
-        info!("no response from server");
-        return Ok(Reply::Done);
+    match await_control(audio, &mut stream)? {
+        Some(b) => ctrl[0] = b,
+        None => {
+            info!("no response from server");
+            return Ok(Reply::Done);
+        }
     }
     let mut reply = Reply::Done;
     match ctrl[0] {
@@ -370,11 +400,44 @@ fn handle_command(
     Ok(reply)
 }
 
+/// Wait for the server's 1-byte control header while playing a soft, looping
+/// "thinking" cue so the device isn't dead-silent during the brain's work.
+/// Non-blocking poll: the ~100 ms audio chunk paces the loop, and a fast reply is
+/// caught on the next poll (so it plays little or no thinking sound). Returns the
+/// control byte, or `None` if the connection closed with no response.
+fn await_control(audio: &mut Audio<'_>, stream: &mut TcpStream) -> Result<Option<u8>> {
+    const CHUNK: usize = 3200; // ~100 ms at 16 kHz mono 16-bit
+    let think = config::PROMPT_THINKING;
+    stream.set_nonblocking(true)?;
+    let mut ctrl = [0u8; 1];
+    let mut pos = 0usize;
+    let result = loop {
+        match stream.read(&mut ctrl) {
+            Ok(0) => break None,           // server closed without replying
+            Ok(_) => break Some(ctrl[0]),  // got the control header
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if !think.is_empty() {
+                    let end = (pos + CHUNK).min(think.len());
+                    audio.write_mono(&think[pos..end])?; // blocks ~chunk -> paces poll
+                    pos = if end >= think.len() { 0 } else { end };
+                }
+            }
+            Err(e) => {
+                stream.set_nonblocking(false).ok();
+                return Err(e.into());
+            }
+        }
+    };
+    stream.set_nonblocking(false)?; // back to blocking for the response body
+    Ok(result)
+}
+
 /// Tell the server to leave transcribe mode (the user pressed the button). Sends
 /// one header byte with the exit marker and an empty utterance, then plays the
 /// server's short spoken confirmation. Best-effort.
 fn send_transcribe_exit(audio: &mut Audio<'_>, server: &str, persona: u8) -> Result<()> {
     info!("transcribe: button exit -> notifying server");
+    audio.beep(700, 90).ok(); // low "off" cue — immediate feedback that the button registered
     let mut stream = TcpStream::connect(server)?;
     stream.set_nodelay(true).ok();
     stream.write_all(&[persona | TRANSCRIBE_EXIT])?; // header only, no audio
