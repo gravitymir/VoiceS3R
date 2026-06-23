@@ -45,6 +45,11 @@ const TRANSCRIBE_EXIT: u8 = 0x80;
 /// announce in the stream header.
 const STREAM_LOCAL: u8 = 0xFC;
 const STREAM_EXTERNAL: u8 = 0xFB;
+/// Server→device reply byte for CODING mode: behave like a normal turn (idle, back
+/// to wake-word/button), but use a longer trailing-silence tail for the next
+/// recordings so the user can pause mid-command while thinking. Stays in effect
+/// until any other reply byte (which resets to the normal tail).
+const CODING: u8 = 0xFA;
 /// Control bytes 128..=228 mean: set volume (byte − 128) AND enter speaker mode
 /// — lets one response do a compound "volume N and speaker mode" command.
 const SPEAKER_VOL_BASE: u8 = 128;
@@ -62,6 +67,8 @@ enum Reply {
     /// Button pressed during a keep-listening (transcribe/translate/etc.) turn —
     /// leave the mode and notify the server.
     ButtonExit,
+    /// Coding mode — like Done (idle), but use the longer silence tail next time.
+    Coding,
 }
 /// TCP port of the PC audio stream server (`pc_speaker`).
 const SPEAKER_PORT: u16 = 9001;
@@ -100,13 +107,16 @@ pub fn run_voice(
     info!("Voice assistant ready. Say 'Sophia' or 'Jarvis', or press the button.");
     let mut frame = vec![0i16; wakeword.frame_len()];
     let mut hb = 0u32;
+    // Coding mode uses a longer trailing-silence tail; the flag persists across
+    // turns (the server keeps it on by replying 0xFA) until any other reply.
+    let mut long_tail = false;
     loop {
         // Manual trigger: a short button press is equivalent to the wake word
         // (a fallback). It uses the default persona (Sophia).
         if pressed(button) {
             wait_release(button);
             info!("button trigger");
-            run_turn(audio, button, codec, store, server, &speaker_addr, &transcribe_addr, PERSONA_SOPHIA)?;
+            run_turn(audio, button, codec, store, server, &speaker_addr, &transcribe_addr, PERSONA_SOPHIA, &mut long_tail)?;
             continue;
         }
 
@@ -119,7 +129,7 @@ pub fn run_voice(
         }
 
         if let Some(persona) = wakeword.process(&frame) {
-            run_turn(audio, button, codec, store, server, &speaker_addr, &transcribe_addr, persona)?;
+            run_turn(audio, button, codec, store, server, &speaker_addr, &transcribe_addr, persona, &mut long_tail)?;
         }
     }
 }
@@ -135,6 +145,7 @@ fn run_turn(
     speaker_addr: &str,
     transcribe_addr: &str,
     persona: u8,
+    long_tail: &mut bool,
 ) -> Result<()> {
     // In continuous transcribe mode the device records utterance after utterance
     // with no wake word (the server tracks the mode and keeps replying TRANSCRIBE).
@@ -169,8 +180,10 @@ fn run_turn(
         let start_ms = if quick_listen { 2000 } else { 4000 };
         quick_listen = false;
 
-        match handle_command(audio, codec, store, server, persona, button, transcribing, start_ms)
-            .unwrap_or(Reply::Done)
+        match handle_command(
+            audio, codec, store, server, persona, button, transcribing, start_ms, *long_tail,
+        )
+        .unwrap_or(Reply::Done)
         {
             // Button tapped mid-turn while in a keep-listening mode: clear the
             // server mode, then listen for the next command immediately (no wake
@@ -216,8 +229,17 @@ fn run_turn(
                 break;
             }
             // A normal command/answer (or a silent post-stop listen) — go home
-            // (back to wake-word listening).
-            Reply::Done => break,
+            // (back to wake-word listening), resetting to the normal silence tail.
+            Reply::Done => {
+                *long_tail = false;
+                break;
+            }
+            // Coding mode: idle like Done, but keep the long silence tail for the
+            // next command (the server keeps replying 0xFA while in coding mode).
+            Reply::Coding => {
+                *long_tail = true;
+                break;
+            }
         }
     }
     info!("resuming wake-word listening");
@@ -238,11 +260,14 @@ fn handle_command(
     button: &PinDriver<'_, Gpio41, Input>,
     transcribing: bool,
     start_timeout_ms: usize,
+    long_tail: bool,
 ) -> Result<Reply> {
     const FRAME_MS: usize = 32; // read_mono returns ~512 samples = 32 ms
     const MAX_FRAMES: usize = 30000 / FRAME_MS; // ~30 s hard cap (long dictation)
     let start_timeout = start_timeout_ms / FRAME_MS; // give up if silent this long
-    const SILENCE_END: usize = 1500 / FRAME_MS; // ~1.5 s trailing silence ends turn
+    // Trailing-silence tail that ends a turn: longer in coding mode so the user can
+    // pause mid-command to think and then keep talking.
+    let silence_end: usize = (if long_tail { 3000 } else { 1500 }) / FRAME_MS;
     const SPEECH_PEAK: i32 = 350; // quiet floor ~40, speech ~1000+
 
     info!("connecting to {server}");
@@ -309,7 +334,7 @@ fn handle_command(
             silence += 1;
         }
 
-        if spoke && silence >= SILENCE_END {
+        if spoke && silence >= silence_end {
             break;
         }
         if !spoke && frames >= start_timeout {
@@ -359,6 +384,10 @@ fn handle_command(
         STREAM_EXTERNAL => {
             reply = Reply::Stream(true);
             info!("server: streaming transcribe (external/Realtime)");
+        }
+        CODING => {
+            reply = Reply::Coding;
+            info!("server: coding mode — idle, long silence tail");
         }
         // Compound: set volume AND enter speaker mode.
         v if v >= SPEAKER_VOL_BASE => {
